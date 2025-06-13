@@ -1,0 +1,277 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <thread>
+#include <mutex>
+
+using namespace std;
+
+// ---------- User class ----------
+
+class User {
+public:
+    string username;
+    string password;
+};
+
+vector<User> users;
+
+bool signUp() {
+    User newUser;
+    cout << "Enter username: ";
+    cin >> newUser.username;
+    cout << "Enter password: ";
+    cin >> newUser.password;
+
+    for (User u : users) {
+        if (u.username == newUser.username) {
+            cout << "Username already exists.\n";
+            return false;
+        }
+    }
+
+    users.push_back(newUser);
+    cout << "Sign-up successful.\n";
+    return true;
+}
+
+bool login() {
+    string uname, pass;
+    cout << "Enter username: ";
+    cin >> uname;
+    cout << "Enter password: ";
+    cin >> pass;
+
+    for (User u : users) {
+        if (u.username == uname && u.password == pass) {
+            cout << "Login successful.\n";
+            return true;
+        }
+    }
+
+    cout << "Invalid credentials.\n";
+    return false;
+}
+
+// ---------- Data Structures ----------
+
+struct CustomerBilling {
+    string msisdn;
+    string brand;
+    string mmc;
+    int inInternal = 0, outInternal = 0;
+    int inExternal = 0, outExternal = 0;
+};
+
+struct OperatorBilling {
+    string brand;
+    string mmc;
+    int totalIn = 0, totalOut = 0;
+};
+
+vector<CustomerBilling> customers;
+vector<OperatorBilling> operators;
+
+mutex customerMutex;
+mutex operatorMutex;
+
+// ---------- Utility Functions ----------
+
+vector<string> split(string line, char delimiter) {
+    vector<string> parts;
+    string temp;
+    for (char c : line) {
+        if (c == delimiter) {
+            parts.push_back(temp);
+            temp = "";
+        } else {
+            temp += c;
+        }
+    }
+    parts.push_back(temp);
+    return parts;
+}
+
+CustomerBilling* getCustomer(string msisdn, string brand, string mmc) {
+    for (auto& c : customers) {
+        if (c.msisdn == msisdn) return &c;
+    }
+    customers.push_back({msisdn, brand, mmc});
+    return &customers.back();
+}
+
+OperatorBilling* getOperator(string mmc, string brand) {
+    for (auto& o : operators) {
+        if (o.mmc == mmc) return &o;
+    }
+    operators.push_back({brand, mmc});
+    return &operators.back();
+}
+
+// ---------- CDR Processing ----------
+
+void processCustomerBilling(string filename) {
+    ifstream file(filename);
+    string line;
+
+    while (getline(file, line)) {
+        auto fields = split(line, '|');
+        if (fields.size() < 10) continue;
+
+        string msisdn = fields[0];
+        string brand = fields[1];
+        string mmc = fields[3];
+        string type = fields[4];
+        int duration = stoi(fields[5]);
+        string toMMC = fields[9];
+
+        lock_guard<mutex> lock(customerMutex);
+        auto* cust = getCustomer(msisdn, brand, mmc);
+
+        if (type == "MOC") {
+            if (mmc == toMMC) cust->outInternal += duration;
+            else cust->outExternal += duration;
+        } else if (type == "MTC") {
+            if (mmc == toMMC) cust->inInternal += duration;
+            else cust->inExternal += duration;
+        }
+    }
+}
+
+void processOperatorBilling(string filename) {
+    ifstream file(filename);
+    string line;
+
+    while (getline(file, line)) {
+        auto fields = split(line, '|');
+        if (fields.size() < 10) continue;
+
+        string brand = fields[1];
+        string mmc = fields[3];
+        string type = fields[4];
+        int duration = stoi(fields[5]);
+
+        lock_guard<mutex> lock(operatorMutex);
+        auto* op = getOperator(mmc, brand);
+
+        if (type == "MOC") op->totalOut += duration;
+        else if (type == "MTC") op->totalIn += duration;
+    }
+}
+
+// ---------- Report Functions ----------
+
+void searchCustomerBilling() {
+    string msisdn;
+    cout << "Enter MSISDN: ";
+    cin >> msisdn;
+
+    for (auto& c : customers) {
+        if (c.msisdn == msisdn) {
+            cout << "\nCustomer ID: " << c.msisdn << " (" << c.brand << ")\n";
+            cout << "* Services within the mobile operator *\n";
+            cout << "Incoming: " << c.inInternal << " | Outgoing: " << c.outInternal << "\n";
+            cout << "* Services outside the mobile operator *\n";
+            cout << "Incoming: " << c.inExternal << " | Outgoing: " << c.outExternal << "\n";
+            return;
+        }
+    }
+
+    cout << "MSISDN not found.\n";
+}
+
+void saveCustomerBillingToFile() {
+    ofstream out("CB.txt");
+    for (auto& c : customers) {
+        out << "Customer ID: " << c.msisdn << " (" << c.brand << ")\n";
+        out << "In-Internal: " << c.inInternal << ", Out-Internal: " << c.outInternal << "\n";
+        out << "In-External: " << c.inExternal << ", Out-External: " << c.outExternal << "\n\n";
+    }
+    out.close();
+    cout << "Saved to CB.txt\n";
+}
+
+void searchOperatorBilling() {
+    string key;
+    cout << "Enter Brand or MMC: ";
+    cin >> key;
+
+    for (auto& o : operators) {
+        if (o.brand == key || o.mmc == key) {
+            cout << "\nOperator: " << o.brand << " (" << o.mmc << ")\n";
+            cout << "Incoming Duration: " << o.totalIn << "\n";
+            cout << "Outgoing Duration: " << o.totalOut << "\n";
+            return;
+        }
+    }
+
+    cout << "Operator not found.\n";
+}
+
+void saveOperatorBillingToFile() {
+    ofstream out("IOSB.txt");
+    for (auto& o : operators) {
+        out << "Operator: " << o.brand << " (" << o.mmc << ")\n";
+        out << "Incoming: " << o.totalIn << ", Outgoing: " << o.totalOut << "\n\n";
+    }
+    out.close();
+    cout << "Saved to IOSB.txt\n";
+}
+
+// ---------- Main Menu ----------
+
+int main() {
+    bool loggedIn = false;
+
+    cout << "Welcome to CDR Billing App!\n";
+
+    while (!loggedIn) {
+        int choice;
+        cout << "\n1. Sign Up\n2. Login\n3. Exit\nChoice: ";
+        cin >> choice;
+
+        if (choice == 1) signUp();
+        else if (choice == 2) loggedIn = login();
+        else if (choice == 3) return 0;
+    }
+
+    while (true) {
+        int choice;
+        cout << "\n1. Process CDR File\n2. Print/Search Billing Info\n3. Logout\nChoice: ";
+        cin >> choice;
+
+        if (choice == 1) {
+            thread t1(processCustomerBilling, "data.cd");
+            thread t2(processOperatorBilling, "data.cd");
+            t1.join(); t2.join();
+            cout << "Processed the CDR data.\n";
+        }
+        else if (choice == 2) {
+            int sub;
+            cout << "\n1. Customer Billing\n2. Interoperator Billing\n3. Back\nChoice: ";
+            cin >> sub;
+
+            if (sub == 1) {
+                int opt;
+                cout << "1. Search MSISDN\n2. Save to CB.txt\nChoice: ";
+                cin >> opt;
+                if (opt == 1) searchCustomerBilling();
+                else saveCustomerBillingToFile();
+            }
+            else if (sub == 2) {
+                int opt;
+                cout << "1. Search Operator\n2. Save to IOSB.txt\nChoice: ";
+                cin >> opt;
+                if (opt == 1) searchOperatorBilling();
+                else saveOperatorBillingToFile();
+            }
+        }
+        else if (choice == 3) {
+            cout << "Logged out.\n";
+            break;
+        }
+    }
+
+    return 0;
+}
