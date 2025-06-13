@@ -1,0 +1,289 @@
+#include <iostream>
+#include <vector>
+#include <fstream>
+#include <thread>
+#include <mutex>
+#include <string>
+
+using namespace std;
+
+mutex mtx;
+
+class User {
+public:
+    string name;
+    int phone;
+    string username;
+    string password;
+
+    User(string n, int p, string u, string pw) : name(n), phone(p), username(u), password(pw) {}
+};
+
+vector<User> users;
+
+bool signupUser() {
+    string name, username, password;
+    int phone;
+    cout << "Enter Name: ";
+    cin >> name;
+    cout << "Enter Phone: ";
+    cin >> phone;
+    cout << "Choose Username: ";
+    cin >> username;
+    cout << "Choose Password: ";
+    cin >> password;
+
+    for (auto& user : users) {
+        if (user.username == username) {
+            cout << "Username already exists.\n";
+            return false;
+        }
+    }
+    users.emplace_back(name, phone, username, password);
+    cout << "Signup successful.\n";
+    return true;
+}
+
+bool loginUser() {
+    string username, password;
+    cout << "Enter Username: ";
+    cin >> username;
+    cout << "Enter Password: ";
+    cin >> password;
+
+    for (auto& user : users) {
+        if (user.username == username && user.password == password) {
+            cout << "Login successful.\n";
+            return true;
+        }
+    }
+    cout << "Invalid credentials.\n";
+    return false;
+}
+
+// Customer Billing structure
+struct CustomerBilling {
+    string msisdn;
+    string brand;
+    string mmc;
+    int inInternal = 0, outInternal = 0;
+    int inExternal = 0, outExternal = 0;
+    int smsInInternal = 0, smsOutInternal = 0;
+    int smsInExternal = 0, smsOutExternal = 0;
+    int downloaded = 0, uploaded = 0;
+};
+
+vector<CustomerBilling> customerData;
+
+// Operator Billing structure
+struct OperatorBilling {
+    string brand;
+    string mmc;
+    int inDuration = 0, outDuration = 0;
+    int smsIn = 0, smsOut = 0;
+    int downloaded = 0, uploaded = 0;
+};
+
+vector<OperatorBilling> operatorData;
+
+// Utility function to split string
+vector<string> split(string line, char delim) {
+    vector<string> parts;
+    string temp;
+    for (char c : line) {
+        if (c == delim) {
+            parts.push_back(temp);
+            temp = "";
+        } else {
+            temp += c;
+        }
+    }
+    parts.push_back(temp);
+    return parts;
+}
+
+CustomerBilling* getCustomer(string msisdn) {
+    for (auto& c : customerData)
+        if (c.msisdn == msisdn)
+            return &c;
+    customerData.push_back({msisdn});
+    return &customerData.back();
+}
+
+OperatorBilling* getOperator(string mmc, string brand) {
+    for (auto& o : operatorData)
+        if (o.mmc == mmc)
+            return &o;
+    operatorData.push_back({brand, mmc});
+    return &operatorData.back();
+}
+
+void processCustomerBilling(string filename) {
+    ifstream file(filename);
+    string line;
+    while (getline(file, line)) {
+        vector<string> parts = split(line, '|');
+        if (parts.size() < 10) continue;
+
+        string msisdn = parts[0];
+        string brand = parts[1];
+        string mmc = parts[3];
+        string type = parts[4];
+        int duration = stoi(parts[5]);
+        int download = stoi(parts[6]);
+        int upload = stoi(parts[7]);
+        string thirdParty = parts[8];
+        string toMMC = parts[9];
+
+        lock_guard<mutex> lock(mtx);
+        CustomerBilling* c = getCustomer(msisdn);
+        c->brand = brand;
+        c->mmc = mmc;
+
+        if (type == "MOC") {
+            if (mmc == toMMC) c->outInternal += duration;
+            else c->outExternal += duration;
+        } else if (type == "MTC") {
+            if (mmc == toMMC) c->inInternal += duration;
+            else c->inExternal += duration;
+        } else if (type == "SMS-MO") {
+            if (mmc == toMMC) c->smsOutInternal++;
+            else c->smsOutExternal++;
+        } else if (type == "SMS-MT") {
+            if (mmc == toMMC) c->smsInInternal++;
+            else c->smsInExternal++;
+        } else if (type == "GPRS") {
+            c->downloaded += download;
+            c->uploaded += upload;
+        }
+    }
+}
+
+void processOperatorBilling(string filename) {
+    ifstream file(filename);
+    string line;
+    while (getline(file, line)) {
+        vector<string> parts = split(line, '|');
+        if (parts.size() < 10) continue;
+
+        string brand = parts[1];
+        string mmc = parts[3];
+        string type = parts[4];
+        int duration = stoi(parts[5]);
+        int download = stoi(parts[6]);
+        int upload = stoi(parts[7]);
+
+        lock_guard<mutex> lock(mtx);
+        OperatorBilling* op = getOperator(mmc, brand);
+
+        if (type == "MOC") op->outDuration += duration;
+        else if (type == "MTC") op->inDuration += duration;
+        else if (type == "SMS-MO") op->smsOut++;
+        else if (type == "SMS-MT") op->smsIn++;
+        else if (type == "GPRS") {
+            op->downloaded += download;
+            op->uploaded += upload;
+        }
+    }
+}
+
+void writeCustomerBillingToFile() {
+    ofstream out("CB.txt");
+    for (auto& c : customerData) {
+        out << "\nCustomer ID: " << c.msisdn << " (" << c.brand << ")\n";
+        out << "* Services within the mobile operator *\n";
+        out << "Incoming voice call durations: " << c.inInternal << "\n";
+        out << "Outgoing voice call durations: " << c.outInternal << "\n";
+        out << "Incoming SMS messages: " << c.smsInInternal << "\n";
+        out << "Outgoing SMS messages: " << c.smsOutInternal << "\n";
+        out << "* Services outside the mobile operator *\n";
+        out << "Incoming voice call durations: " << c.inExternal << "\n";
+        out << "Outgoing voice call durations: " << c.outExternal << "\n";
+        out << "Incoming SMS messages: " << c.smsInExternal << "\n";
+        out << "Outgoing SMS messages: " << c.smsOutExternal << "\n";
+        out << "* Internet use *\nMB downloaded: " << c.downloaded << " | MB uploaded: " << c.uploaded << "\n";
+    }
+    cout << "Customer billing saved to CB.txt\n";
+}
+
+void writeOperatorBillingToFile() {
+    ofstream out("IOSB.txt");
+    for (auto& o : operatorData) {
+        out << "\nOperator Brand: " << o.brand << " (" << o.mmc << ")\n";
+        out << "Incoming voice call durations: " << o.inDuration << "\n";
+        out << "Outgoing voice call durations: " << o.outDuration << "\n";
+        out << "Incoming SMS messages: " << o.smsIn << "\n";
+        out << "Outgoing SMS messages: " << o.smsOut << "\n";
+        out << "MB downloaded: " << o.downloaded << " | MB uploaded: " << o.uploaded << "\n";
+    }
+    cout << "Operator billing saved to IOSB.txt\n";
+}
+
+// ------------------------ MAIN MENU ------------------------
+int main() {
+    bool loggedIn = false;
+
+    while (true) {
+        cout << "\n1. Sign Up\n2. Login\n3. Exit\nChoice: ";
+        int choice;
+        cin >> choice;
+
+        if (choice == 1) {
+            signupUser();
+        } else if (choice == 2) {
+            loggedIn = loginUser();
+        } else if (choice == 3) {
+            break;
+        }
+
+        while (loggedIn) {
+            cout << "\n1. Process CDR File\n2. Print/Search Billing Info\n3. Logout\nChoice: ";
+            int opt;
+            cin >> opt;
+            if (opt == 1) {
+                thread t1(processCustomerBilling, "data.cd");
+                thread t2(processOperatorBilling, "data.cd");
+                t1.join();
+                t2.join();
+                cout << "Processed the CDR data.\n";
+            } else if (opt == 2) {
+                cout << "1. Customer Billing\n2. Interoperator Settlement Billing\n3. Back\nChoice: ";
+                int sub;
+                cin >> sub;
+                if (sub == 1) {
+                    cout << "1. Search MSISDN\n2. Write All to CB.txt\nChoice: ";
+                    int ch;
+                    cin >> ch;
+                    if (ch == 1) {
+                        string id;
+                        cout << "Enter MSISDN: ";
+                        cin >> id;
+                        for (auto& c : customerData)
+                            if (c.msisdn == id)
+                                cout << "Customer: " << c.msisdn << " Outgoing internal: " << c.outInternal << "\n";
+                    } else {
+                        writeCustomerBillingToFile();
+                    }
+                } else if (sub == 2) {
+                    cout << "1. Search MMC\n2. Write All to IOSB.txt\nChoice: ";
+                    int ch;
+                    cin >> ch;
+                    if (ch == 1) {
+                        string id;
+                        cout << "Enter MMC: ";
+                        cin >> id;
+                        for (auto& o : operatorData)
+                            if (o.mmc == id)
+                                cout << "Operator: " << o.brand << " Incoming: " << o.inDuration << "\n";
+                    } else {
+                        writeOperatorBillingToFile();
+                    }
+                }
+            } else {
+                loggedIn = false;
+            }
+        }
+    }
+
+    return 0;
+}
