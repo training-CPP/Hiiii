@@ -1,0 +1,341 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <thread>
+#include <mutex>
+
+using namespace std;
+
+struct CustomerBilling {
+    string MSISDN;
+    string operatorBrand;
+    string operatorMMC;
+
+    int outVoiceWithin = 0;
+    int inVoiceWithin = 0;
+    int outVoiceOutside = 0;
+    int inVoiceOutside = 0;
+    int outSMSWithin = 0;
+    int inSMSWithin = 0;
+    int outSMSOutside = 0;
+    int inSMSOutside = 0;
+    int mbDownload = 0;
+    int mbUpload = 0;
+};
+
+struct OperatorBilling {
+    string operatorMMC;
+    string operatorBrand;
+    int inVoiceDuration = 0;
+    int outVoiceDuration = 0;
+    int inSMS = 0;
+    int outSMS = 0;
+    int mbDownload = 0;
+    int mbUpload = 0;
+};
+
+struct User {
+    string username;
+    string password;
+    string name;
+    int phoneNo;
+};
+
+vector<User> users;
+bool loggedIn = false;
+string currentUser;
+
+// Databases for processed data
+vector<CustomerBilling> customerData;
+vector<OperatorBilling> operatorData;
+
+mutex custMutex, operMutex;
+
+void replaceChar(string& s, char oldChar, char newChar) {
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == oldChar) s[i] = newChar;
+    }
+}
+
+void split(const string& s, vector<string>& parts) {
+    parts.clear();
+    string temp = "";
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == ' ') {
+            if (temp != "") {
+                parts.push_back(temp);
+                temp = "";
+            }
+        } else {
+            temp += s[i];
+        }
+    }
+    if (temp != "") parts.push_back(temp);
+}
+
+CustomerBilling* findOrCreateCustomer(const string& msisdn, const string& brand, const string& mmc) {
+    for (size_t i = 0; i < customerData.size(); i++) {
+        if (customerData[i].MSISDN == msisdn) return &customerData[i];
+    }
+    CustomerBilling c;
+    c.MSISDN = msisdn;
+    c.operatorBrand = brand;
+    c.operatorMMC = mmc;
+    customerData.push_back(c);
+    return &customerData.back();
+}
+
+OperatorBilling* findOrCreateOperator(const string& mmc, const string& brand) {
+    for (size_t i = 0; i < operatorData.size(); i++) {
+        if (operatorData[i].operatorMMC == mmc) return &operatorData[i];
+    }
+    OperatorBilling o;
+    o.operatorMMC = mmc;
+    o.operatorBrand = brand;
+    operatorData.push_back(o);
+    return &operatorData.back();
+}
+
+bool sameOperator(const string& mmc1, const string& mmc2) {
+    return mmc1 == mmc2;
+}
+
+void processCustomerBilling(const string& filename, const string& currentOperatorMMC) {
+    ifstream file(filename);
+    if (!file.is_open()) {
+        cout << "Cannot open CDR file.\n";
+        return;
+    }
+
+    string line;
+    while (getline(file, line)) {
+        if (line.empty()) continue;
+
+        // Replace | by space to split easily
+        replaceChar(line, '|', ' ');
+
+        vector<string> fields;
+        split(line, fields);
+
+        if (fields.size() < 9) continue;
+
+        string MSISDN = fields[0];
+        string operatorBrand = fields[1];
+        string operatorMMC = fields[2];
+        string callType = fields[3];
+        int duration = stoi(fields[4]);
+        int download = stoi(fields[5]);
+        int upload = stoi(fields[6]);
+        string thirdPartyMSISDN = fields[7];
+        string thirdPartyMMC = fields[8];
+
+        CustomerBilling* cust = nullptr;
+
+        custMutex.lock();
+        cust = findOrCreateCustomer(MSISDN, operatorBrand, operatorMMC);
+        custMutex.unlock();
+
+        bool isWithinOperator = sameOperator(operatorMMC, currentOperatorMMC);
+        bool thirdPartyWithin = sameOperator(thirdPartyMMC, currentOperatorMMC);
+
+        custMutex.lock();
+        if (callType == "MOC") {
+            if (isWithinOperator && thirdPartyWithin)
+                cust->outVoiceWithin += duration;
+            else
+                cust->outVoiceOutside += duration;
+        } else if (callType == "MTC") {
+            if (isWithinOperator && thirdPartyWithin)
+                cust->inVoiceWithin += duration;
+            else
+                cust->inVoiceOutside += duration;
+        } else if (callType == "SMS-MO") {
+            if (isWithinOperator && thirdPartyWithin)
+                cust->outSMSWithin += 1;
+            else
+                cust->outSMSOutside += 1;
+        } else if (callType == "SMS-MT") {
+            if (isWithinOperator && thirdPartyWithin)
+                cust->inSMSWithin += 1;
+            else
+                cust->inSMSOutside += 1;
+        } else if (callType == "GPRS") {
+            cust->mbDownload += download;
+            cust->mbUpload += upload;
+        }
+        custMutex.unlock();
+    }
+    file.close();
+}
+
+void processOperatorBilling(const string& filename) {
+    ifstream file(filename);
+    if (!file.is_open()) {
+        cout << "Cannot open CDR file.\n";
+        return;
+    }
+
+    string line;
+    while (getline(file, line)) {
+        if (line.empty()) continue;
+
+        replaceChar(line, '|', ' ');
+        vector<string> fields;
+        split(line, fields);
+        if (fields.size() < 9) continue;
+
+        string MSISDN = fields[0];
+        string operatorBrand = fields[1];
+        string operatorMMC = fields[2];
+        string callType = fields[3];
+        int duration = stoi(fields[4]);
+        int download = stoi(fields[5]);
+        int upload = stoi(fields[6]);
+        string thirdPartyMSISDN = fields[7];
+        string thirdPartyMMC = fields[8];
+
+        operMutex.lock();
+        OperatorBilling* oper1 = findOrCreateOperator(operatorMMC, operatorBrand);
+        OperatorBilling* oper2 = nullptr;
+        if (thirdPartyMMC != "") {
+            oper2 = findOrCreateOperator(thirdPartyMMC, "");
+        }
+
+        // Add for operator 1
+        if (callType == "MOC")
+            oper1->outVoiceDuration += duration;
+        else if (callType == "MTC")
+            oper1->inVoiceDuration += duration;
+        else if (callType == "SMS-MO")
+            oper1->outSMS += 1;
+        else if (callType == "SMS-MT")
+            oper1->inSMS += 1;
+        else if (callType == "GPRS") {
+            oper1->mbDownload += download;
+            oper1->mbUpload += upload;
+        }
+
+        // For operator 2 (third party) - usually for inter-operator billing, but based on problem statement just aggregate for the operator id present
+        if (oper2 != nullptr) {
+            if (callType == "MOC")
+                oper2->inVoiceDuration += duration;
+            else if (callType == "MTC")
+                oper2->outVoiceDuration += duration;
+            else if (callType == "SMS-MO")
+                oper2->inSMS += 1;
+            else if (callType == "SMS-MT")
+                oper2->outSMS += 1;
+        }
+
+        operMutex.unlock();
+    }
+    file.close();
+}
+
+void printCustomerData() {
+    for (size_t i = 0; i < customerData.size(); i++) {
+        cout << "# Customers Data Base:\n";
+        cout << "Customer ID: " << customerData[i].MSISDN << " (" << customerData[i].operatorBrand << ")\n";
+        cout << "* Services within the mobile operator *\n";
+        cout << "Incoming voice call durations: " << customerData[i].inVoiceWithin << "\n";
+        cout << "Outgoing voice call durations: " << customerData[i].outVoiceWithin << "\n";
+        cout << "Incoming SMS messages: " << customerData[i].inSMSWithin << "\n";
+        cout << "Outgoing SMS messages: " << customerData[i].outSMSWithin << "\n";
+        cout << "* Services outside the mobile operator *\n";
+        cout << "Incoming voice call durations: " << customerData[i].inVoiceOutside << "\n";
+        cout << "Outgoing voice call durations: " << customerData[i].outVoiceOutside << "\n";
+        cout << "Incoming SMS messages: " << customerData[i].inSMSOutside << "\n";
+        cout << "Outgoing SMS messages: " << customerData[i].outSMSOutside << "\n";
+        cout << "* Internet use *\n";
+        cout << "MB downloaded: " << customerData[i].mbDownload << " | MB uploaded: " << customerData[i].mbUpload << "\n\n";
+    }
+}
+
+void printOperatorData() {
+    for (size_t i = 0; i < operatorData.size(); i++) {
+        cout << "# Operator Data Base:\n";
+        cout << "Operator ID: " << operatorData[i].operatorMMC << " (" << operatorData[i].operatorBrand << ")\n";
+        cout << "Incoming voice call durations: " << operatorData[i].inVoiceDuration << "\n";
+        cout << "Outgoing voice call durations: " << operatorData[i].outVoiceDuration << "\n";
+        cout << "Incoming SMS messages: " << operatorData[i].inSMS << "\n";
+        cout << "Outgoing SMS messages: " << operatorData[i].outSMS << "\n";
+        cout << "MB downloaded: " << operatorData[i].mbDownload << " | MB uploaded: " << operatorData[i].mbUpload << "\n\n";
+    }
+}
+
+void signup() {
+    User u;
+    cout << "Enter username: ";
+    cin >> u.username;
+    cout << "Enter password: ";
+    cin >> u.password;
+    cout << "Enter name: ";
+    cin.ignore();
+    getline(cin, u.name);
+    cout << "Enter phone number: ";
+    cin >> u.phoneNo;
+
+    users.push_back(u);
+    cout << "Signup successful!\n";
+}
+
+bool login() {
+    string username, password;
+    cout << "Enter username: ";
+    cin >> username;
+    cout << "Enter password: ";
+    cin >> password;
+
+    for (size_t i = 0; i < users.size(); i++) {
+        if (users[i].username == username && users[i].password == password) {
+            cout << "Welcome " << users[i].name << endl;
+            loggedIn = true;
+            currentUser = username;
+            return true;
+        }
+    }
+    cout << "Invalid username or password!\n";
+    return false;
+}
+
+void logout() {
+    loggedIn = false;
+    currentUser = "";
+    cout << "Logged out successfully.\n";
+}
+
+int main() {
+    string cdrFileName = "cdr.txt"; // File to process
+    string currentOperatorMMC = "344"; // Example operator MMC you run for (can be asked from user)
+
+    while (true) {
+        if (!loggedIn) {
+            cout << "1) Signup\n2) Login\n3) Exit\nChoice: ";
+            int choice; cin >> choice;
+            if (choice == 1) signup();
+            else if (choice == 2) login();
+            else if (choice == 3) break;
+            else cout << "Invalid choice\n";
+        } else {
+            cout << "1) Process CDR File\n2) Print Customer Data\n3) Print Operator Data\n4) Logout\nChoice: ";
+            int choice; cin >> choice;
+            if (choice == 1) {
+                thread t1(processCustomerBilling, cdrFileName, currentOperatorMMC);
+                thread t2(processOperatorBilling, cdrFileName);
+
+                t1.join();
+                t2.join();
+
+                cout << "Processing complete.\n";
+            }
+            else if (choice == 2) printCustomerData();
+            else if (choice == 3) printOperatorData();
+            else if (choice == 4) logout();
+            else cout << "Invalid choice\n";
+        }
+    }
+
+    cout << "Goodbye!\n";
+    return 0;
+}
